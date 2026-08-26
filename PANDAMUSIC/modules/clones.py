@@ -2,8 +2,8 @@
 PANDAMUSIC — Clone bots manager
 
 - New Handler instances (not shared objects)
-- Broader BotFather token match
-- Essential handlers always attached if copy fails
+- /start uses same full menu as main bot (no minimal override)
+- Essential: only cloneping + fallback start if copy fails
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ log = console.logs(__name__)
 _clone_clients: Dict[int, Dict[str, Any]] = {}
 _mem_clones: List[Dict[str, Any]] = []
 
-# BotFather tokens — allow common special chars seen in new tokens
 TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{20,100}$")
 
 
@@ -45,7 +44,6 @@ def is_bot_token(text: str) -> bool:
         return False
     if TOKEN_RE.match(t):
         return True
-    # fallback: digits:longstring
     if ":" in t:
         left, right = t.split(":", 1)
         if left.isdigit() and 5 <= len(left) <= 15 and len(right) >= 20:
@@ -210,12 +208,9 @@ def _copy_handlers(source: Client, target: Client) -> int:
     return count
 
 
-def _attach_essential_handlers(client: Client) -> int:
-    """Always-on handlers so clone responds even if copy failed."""
+def _attach_cloneping(client: Client) -> None:
     from pyrogram import filters
     from pyrogram.handlers import MessageHandler
-
-    n = 0
 
     async def _ping(c, m):
         try:
@@ -228,36 +223,53 @@ def _attach_essential_handlers(client: Client) -> int:
             except Exception:
                 pass
 
+    try:
+        client.add_handler(
+            MessageHandler(
+                _ping, filters.command(["cloneping", "cping"], ["/", "!", "."])
+            ),
+            group=-1,
+        )
+    except Exception as e:
+        log.warning("cloneping attach: %s", e)
+
+
+def _attach_start_fallback(client: Client) -> None:
+    """Only when plugin handlers failed to copy — still try real start menu."""
+    from pyrogram import filters
+    from pyrogram.handlers import MessageHandler
+
     async def _start(c, m):
+        # Prefer real start menu from plugins
+        try:
+            from ..plugins.start import start_message_private
+
+            return await start_message_private(c, m)
+        except Exception as e1:
+            log.warning("clone start→plugin fail: %s", e1)
         try:
             me = await c.get_me()
             un = f"@{me.username}" if me.username else str(me.id)
             await m.reply_text(
-                f"✅ Clone bot ready — {un}\n\n"
-                f"Commands:\n"
-                f"• /cloneping — check online\n"
-                f"• /play song — music (group + VC)\n"
-                f"• /help — full menu\n"
+                f"✅ {un} online\n\n"
+                f"Use /play in a group with video chat admin.\n"
+                f"/cloneping — status"
             )
-        except Exception as e:
+        except Exception as e2:
             try:
-                await m.reply_text(f"Clone start ok\n{e}")
+                await m.reply_text(f"Clone online\n{e2}")
             except Exception:
                 pass
 
-    for cmds, cb in (
-        (["cloneping", "cping", "ping"], _ping),
-        (["start", "help"], _start),
-    ):
-        try:
-            client.add_handler(
-                MessageHandler(cb, filters.command(cmds, ["/", "!", "."])),
-                group=-2,
-            )
-            n += 1
-        except Exception as e:
-            log.warning("essential handler %s: %s", cmds, e)
-    return n
+    try:
+        client.add_handler(
+            MessageHandler(
+                _start, filters.command(["start", "help"], ["/", "!", "."])
+            ),
+            group=0,
+        )
+    except Exception as e:
+        log.warning("start fallback attach: %s", e)
 
 
 async def start_clone_client(
@@ -334,8 +346,14 @@ async def start_clone_client(
             pass
         return _clone_clients[bot_id]
 
+    # Copy ALL main-bot plugin handlers (includes full /start menu)
     n = _copy_handlers(bot, client)
-    n_ess = _attach_essential_handlers(client)
+    _attach_cloneping(client)
+
+    # Only if copy failed — attach start that still tries real menu
+    if n == 0:
+        log.warning("Clone %s: 0 handlers copied — attaching start fallback", bot_id)
+        _attach_start_fallback(client)
 
     try:
         client.me = me  # type: ignore
@@ -352,24 +370,18 @@ async def start_clone_client(
         "bot_id": bot_id,
         "username": username,
         "name": name,
-        "handlers": n + n_ess,
+        "handlers": n,
     }
     _clone_clients[bot_id] = entry
     await db_save_clone(bot_id, int(owner_id), token, username, name)
 
     log.info(
-        "Clone started @%s id=%s owner=%s handlers_copied=%s essential=%s",
+        "Clone started @%s id=%s owner=%s handlers_copied=%s",
         username,
         bot_id,
         owner_id,
         n,
-        n_ess,
     )
-    if n == 0:
-        log.warning(
-            "Clone %s: 0 plugin handlers copied — essential handlers only.",
-            bot_id,
-        )
     return entry
 
 
