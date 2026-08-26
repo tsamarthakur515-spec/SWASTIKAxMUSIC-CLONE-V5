@@ -19,7 +19,6 @@ from .. import bot, console
 log = console.logs(__name__)
 
 _clone_clients: Dict[int, Dict[str, Any]] = {}
-_mem_clones: List[Dict[str, Any]] = {}
 _mem_clones: List[Dict[str, Any]] = []
 
 # BotFather tokens — allow common special chars seen in new tokens
@@ -335,7 +334,6 @@ async def start_clone_client(
             pass
         return _clone_clients[bot_id]
 
-    # Copy all plugin handlers as NEW instances
     n = _copy_handlers(bot, client)
     n_ess = _attach_essential_handlers(client)
 
@@ -369,8 +367,7 @@ async def start_clone_client(
     )
     if n == 0:
         log.warning(
-            "Clone %s: 0 plugin handlers copied — essential handlers only. "
-            "Main bot plugins may not be on dispatcher yet.",
+            "Clone %s: 0 plugin handlers copied — essential handlers only.",
             bot_id,
         )
     return entry
