@@ -34,7 +34,6 @@ E_START_STICKER = "6154300385520522693"
 
 
 def _client_token(client) -> str | None:
-    """Token for this client (clone or main)."""
     return resolve_token(client=client)
 
 
@@ -186,6 +185,7 @@ def help_menu_markup() -> InlineKeyboardMarkup:
         ],
         [
             _btn(smallcaps("FUN"), _PRIMARY, callback_data="fun_menu", icon_custom_emoji_id=E_HELP_INSIDE),
+            _btn(smallcaps("CLONE"), _SUCCESS, callback_data="clone_menu", icon_custom_emoji_id=E_HELP_INSIDE),
         ],
         [
             _btn(smallcaps("« BACK"), _DANGER, callback_data="home_menu", icon_custom_emoji_id=E_HELP_INSIDE),
@@ -266,7 +266,8 @@ def help_list_caption() -> str:
         f"• chatbot — chaton chatoff\n"
         f"• locks — lock unlock content types\n"
         f"• games — economy rpg social\n"
-        f"• fun — couple riddle dice slots coinflip"
+        f"• fun — couple riddle dice slots coinflip\n"
+        f"• clone — create your own music bot"
     )
     return f"<blockquote expandable>{tg_emoji(E.GEAR, '⚙️')} {body}</blockquote>"
 
@@ -425,7 +426,6 @@ async def start_message_private(client, message):
     mention = _safe_mention(message.from_user)
     photo = console.START_IMAGE_URL
     caption = start_caption(mention)
-    # Always use THIS client identity (clone username if clone)
     try:
         me = client.me or await client.get_me()
         bot_username = me.username or ""
