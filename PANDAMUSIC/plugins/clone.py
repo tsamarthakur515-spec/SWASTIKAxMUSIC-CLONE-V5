@@ -35,6 +35,16 @@ def _looks_like_token(t: str) -> bool:
     return left.isdigit() and 5 <= len(left) <= 15 and len(right) >= 20
 
 
+def _ui_mode_active(uid) -> bool:
+    """True if help-menu clone UI is waiting for token/id."""
+    try:
+        from . import clone_ui
+
+        return bool(clone_ui.get_ui_mode(uid))
+    except Exception:
+        return False
+
+
 def _extract_token(message: Message) -> str:
     text = (message.text or message.caption or "") or ""
     if not text.strip():
@@ -161,6 +171,11 @@ async def clone_token_paste(client, message: Message):
     if not message.from_user:
         return
     uid = message.from_user.id
+
+    # Menu UI (create/delete) handles the paste — do NOT clone here
+    if _ui_mode_active(uid):
+        return
+
     if not _pending_token.get(uid):
         return
 
