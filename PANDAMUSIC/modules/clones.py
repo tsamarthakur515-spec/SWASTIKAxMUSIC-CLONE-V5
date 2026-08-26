@@ -1,9 +1,9 @@
 """
-PANDAMUSIC — Clone bots manager (fixed)
+PANDAMUSIC — Clone bots manager
 
 - New Handler instances (not shared objects)
-- Single start path (no start/stop validate race)
-- Clients kept alive for idle() update loop
+- Broader BotFather token match
+- Essential handlers always attached if copy fails
 """
 
 from __future__ import annotations
@@ -19,10 +19,11 @@ from .. import bot, console
 log = console.logs(__name__)
 
 _clone_clients: Dict[int, Dict[str, Any]] = {}
+_mem_clones: List[Dict[str, Any]] = {}
 _mem_clones: List[Dict[str, Any]] = []
 
-# BotFather tokens: 123456:AAH... (allow broader charset)
-TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{20,}$")
+# BotFather tokens — allow common special chars seen in new tokens
+TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{20,100}$")
 
 
 def _clone_limit() -> int:
@@ -41,7 +42,16 @@ def _table() -> str:
 
 def is_bot_token(text: str) -> bool:
     t = (text or "").strip()
-    return bool(TOKEN_RE.match(t))
+    if not t or " " in t or "\n" in t:
+        return False
+    if TOKEN_RE.match(t):
+        return True
+    # fallback: digits:longstring
+    if ":" in t:
+        left, right = t.split(":", 1)
+        if left.isdigit() and 5 <= len(left) <= 15 and len(right) >= 20:
+            return True
+    return False
 
 
 async def ensure_clone_table() -> bool:
@@ -161,18 +171,13 @@ def _clone_handler(handler) -> Any:
     if callback is None:
         return None
     filters_ = getattr(handler, "filters", None)
-    # Common pyrogram handlers: Handler(callback, filters=None)
-    for args in (
-        (callback, filters_),
-        (callback,),
-    ):
+    for args in ((callback, filters_), (callback,)):
         try:
             return cls(*args)
         except TypeError:
             continue
         except Exception:
             continue
-    # kwargs fallback
     try:
         return cls(callback=callback, filters=filters_)
     except Exception:
@@ -206,10 +211,12 @@ def _copy_handlers(source: Client, target: Client) -> int:
     return count
 
 
-def _attach_clone_ping(client: Client) -> None:
-    """Minimal always-on command so user can verify clone is alive."""
+def _attach_essential_handlers(client: Client) -> int:
+    """Always-on handlers so clone responds even if copy failed."""
     from pyrogram import filters
     from pyrogram.handlers import MessageHandler
+
+    n = 0
 
     async def _ping(c, m):
         try:
@@ -218,17 +225,40 @@ def _attach_clone_ping(client: Client) -> None:
             await m.reply_text(f"✅ Clone online — {un}\n🆔 `{me.id}`")
         except Exception as e:
             try:
-                await m.reply_text(f"✅ Clone alive\nError detail: {e}")
+                await m.reply_text(f"✅ Clone alive\n{e}")
             except Exception:
                 pass
 
-    try:
-        client.add_handler(
-            MessageHandler(_ping, filters.command(["cloneping", "cping"], ["/", "!", "."])),
-            group=-1,
-        )
-    except Exception as e:
-        log.warning("cloneping attach: %s", e)
+    async def _start(c, m):
+        try:
+            me = await c.get_me()
+            un = f"@{me.username}" if me.username else str(me.id)
+            await m.reply_text(
+                f"✅ Clone bot ready — {un}\n\n"
+                f"Commands:\n"
+                f"• /cloneping — check online\n"
+                f"• /play song — music (group + VC)\n"
+                f"• /help — full menu\n"
+            )
+        except Exception as e:
+            try:
+                await m.reply_text(f"Clone start ok\n{e}")
+            except Exception:
+                pass
+
+    for cmds, cb in (
+        (["cloneping", "cping", "ping"], _ping),
+        (["start", "help"], _start),
+    ):
+        try:
+            client.add_handler(
+                MessageHandler(cb, filters.command(cmds, ["/", "!", "."])),
+                group=-2,
+            )
+            n += 1
+        except Exception as e:
+            log.warning("essential handler %s: %s", cmds, e)
+    return n
 
 
 async def start_clone_client(
@@ -246,9 +276,9 @@ async def start_clone_client(
     if console.BOT_TOKEN and token == str(console.BOT_TOKEN).strip():
         raise RuntimeError("Ye main bot ka token hai — clone nahi banega.")
 
-    # Already running?
     for bid, ent in list(_clone_clients.items()):
         if ent.get("token") == token or (bot_id and bid == int(bot_id)):
+            log.info("Clone already running id=%s", bid)
             return ent
 
     if not console.API_ID or not console.API_HASH:
@@ -261,12 +291,17 @@ async def start_clone_client(
         api_hash=str(console.API_HASH),
         bot_token=token,
         in_memory=True,
-        workers=4,
+        workers=8,
     )
 
     try:
         await client.start()
     except Exception as e:
+        err = str(e).lower()
+        if "unauthorized" in err or "access_token" in err or "token" in err:
+            raise RuntimeError(
+                f"Token invalid / revoked. @BotFather se naya token lo.\nDetail: {e}"
+            ) from e
         raise RuntimeError(f"Telegram start fail: {e}") from e
 
     try:
@@ -277,6 +312,13 @@ async def start_clone_client(
         except Exception:
             pass
         raise RuntimeError(f"get_me fail (token invalid?): {e}") from e
+
+    if not getattr(me, "is_bot", True):
+        try:
+            await client.stop()
+        except Exception:
+            pass
+        raise RuntimeError("Ye user account token nahi — sirf BotFather bot token use karo.")
 
     bot_id = int(me.id)
     username = me.username or username or ""
@@ -295,9 +337,8 @@ async def start_clone_client(
 
     # Copy all plugin handlers as NEW instances
     n = _copy_handlers(bot, client)
-    _attach_clone_ping(client)
+    n_ess = _attach_essential_handlers(client)
 
-    # Ensure bot identity attrs (some plugins use client.me / username)
     try:
         client.me = me  # type: ignore
         client.username = username  # type: ignore
@@ -313,20 +354,23 @@ async def start_clone_client(
         "bot_id": bot_id,
         "username": username,
         "name": name,
+        "handlers": n + n_ess,
     }
     _clone_clients[bot_id] = entry
     await db_save_clone(bot_id, int(owner_id), token, username, name)
 
     log.info(
-        "Clone started @%s id=%s owner=%s handlers=%s",
+        "Clone started @%s id=%s owner=%s handlers_copied=%s essential=%s",
         username,
         bot_id,
         owner_id,
         n,
+        n_ess,
     )
     if n == 0:
         log.warning(
-            "Clone %s has 0 handlers — main bot plugins may not be loaded yet",
+            "Clone %s: 0 plugin handlers copied — essential handlers only. "
+            "Main bot plugins may not be on dispatcher yet.",
             bot_id,
         )
     return entry
@@ -352,7 +396,7 @@ def get_running_clones() -> List[Dict[str, Any]]:
             "owner_id": v["owner_id"],
             "username": v.get("username") or "",
             "name": v.get("name") or "",
-            "handlers": True,
+            "handlers": v.get("handlers", True),
         }
         for v in _clone_clients.values()
     ]
@@ -399,14 +443,10 @@ async def user_can_clone(owner_id: int) -> Tuple[bool, str]:
     return True, ""
 
 
-# Backwards-compatible alias used by plugin
 async def validate_bot_token(token: str) -> Optional[Dict[str, Any]]:
-    """Lightweight format check only — real check happens in start_clone_client."""
     token = (token or "").strip()
     if not is_bot_token(token):
         return None
-    # Don't start/stop a second client (causes race). Return placeholder;
-    # start_clone_client will verify via get_me.
     parts = token.split(":", 1)
     try:
         bid = int(parts[0])
