@@ -1,6 +1,5 @@
 # ---------------------------------------------------------------
-# PANDAMUSIC — clone.py
-# Hardened: regex + group=-5 so handler ALWAYS fires
+# PANDAMUSIC — clone.py  (/clone TOKEN command)
 # ---------------------------------------------------------------
 
 print("[clone] loading plugin...", flush=True)
@@ -13,6 +12,7 @@ from pyrogram.enums import ChatType, ParseMode
 from pyrogram.types import Message
 
 from .. import bot, console
+from ..modules.formatters import smallcaps
 
 _pending_token = {}
 TOKEN_FIND = re.compile(r"(\d{5,15}:[A-Za-z0-9_-]{20,100})")
@@ -111,12 +111,10 @@ async def _delete(message):
 async def clone_cmd(client, message: Message):
     uid = getattr(message.from_user, "id", None)
     chat_id = message.chat.id if message.chat else None
-    print(f"[clone] CMD HIT uid={uid} chat={chat_id} text={((message.text or '')[:120])!r}", flush=True)
-
-    try:
-        await client.send_message(chat_id, "⚡ Clone command received...")
-    except Exception as e:
-        print(f"[clone] instant send fail: {e}", flush=True)
+    print(
+        f"[clone] CMD HIT uid={uid} chat={chat_id} text={((message.text or '')[:120])!r}",
+        flush=True,
+    )
 
     try:
         if not message.from_user:
@@ -140,12 +138,12 @@ async def clone_cmd(client, message: Message):
             _pending_token[uid] = True
             return await _reply(
                 message,
-                "✨ <b>Swastika Clone</b>\n\n"
-                "Usage (token <b>ek line</b> me):\n"
-                "<code>/clone 123456:AAHxxxx</code>\n\n"
-                "Ya /clone ke baad agli message me sirf token bhejo.\n\n"
-                "• /myclones — list\n"
-                "• /delclone ID — delete",
+                f"✨ <b>{smallcaps('swastika clone')}</b>\n\n"
+                f"{smallcaps('usage')} (token <b>{smallcaps('ek line')}</b> me):\n"
+                f"<code>/clone 123456:AAHxxxx</code>\n\n"
+                f"{smallcaps('or open help menu → clone button.')}\n\n"
+                f"• /myclones — list\n"
+                f"• /delclone ID — delete",
             )
 
         await _do_clone(client, message, token)
@@ -177,7 +175,8 @@ async def clone_token_paste(client, message: Message):
         if ":" in text:
             return await _reply(
                 message,
-                "❌ Token incomplete / galat.\nPoora token <b>ek line</b> me bhejo.",
+                f"❌ {smallcaps('token incomplete / galat.')}\n"
+                f"{smallcaps('poora token ek line me bhejo.')}",
             )
         return
 
@@ -190,13 +189,15 @@ async def _do_clone(client, message: Message, token: str):
     uid = message.from_user.id
     token = _normalize_token(token)
 
-    status = await _reply(message, "⏳ <b>cloning....</b>")
+    status = await _reply(
+        message, f"⏳ <b>{smallcaps('cloning your bot.......')}</b>"
+    )
     await _delete(message)
 
     if not _looks_like_token(token):
         return await _edit(
             status,
-            "❌ Invalid token.\nExample: <code>123456789:AAHxxxx</code>",
+            f"❌ {smallcaps('invalid token.')}\nExample: <code>123456789:AAHxxxx</code>",
         )
 
     try:
@@ -206,18 +207,20 @@ async def _do_clone(client, message: Message, token: str):
         traceback.print_exc()
         return await _edit(
             status,
-            "❌ Clone module load nahi hua.\nPanel se <b>Rebuild</b> karo.",
+            f"❌ {smallcaps('clone module load nahi hua.')}\nPanel se <b>Rebuild</b> karo.",
         )
 
     if not is_bot_token(token):
         return await _edit(
             status,
-            "❌ Invalid token format.\n<code>123456789:AAHxxxx</code>",
+            f"❌ {smallcaps('invalid token format.')}\n<code>123456789:AAHxxxx</code>",
         )
 
     ok, reason = await user_can_clone(uid)
     if not ok:
         return await _edit(status, f"❌ {reason}")
+
+    await _edit(status, f"⏳ <b>{smallcaps('starting your bot.....')}</b>")
 
     try:
         entry = await start_clone_client(token, uid)
@@ -227,27 +230,19 @@ async def _do_clone(client, message: Message, token: str):
         return await _edit(
             status,
             f"❌ Clone fail:\n<code>{str(e)[:450]}</code>\n\n"
-            "• @BotFather se naya token\n"
-            "• Main bot token mat use karo\n"
-            "• Token ek line me bhejo",
+            f"• @BotFather se naya token\n"
+            f"• Main bot token mat use karo\n"
+            f"• Token ek line me bhejo",
         )
 
     uname = (entry.get("username") or "").strip()
     bot_id = entry.get("bot_id")
-    name = entry.get("name") or "Clone"
     who = f"@{uname}" if uname else f"<code>{bot_id}</code>"
 
     text = (
-        f"✅ <b>Bot Cloned!</b>\n\n"
-        f"🤖 Username: <b>{who}</b>\n"
-        f"📛 Name: {name}\n"
-        f"🆔 <code>{bot_id}</code>\n\n"
-        f"Next:\n"
-        f"1. {who} ko group me add karo\n"
-        f"2. Admin + manage video chats\n"
-        f"3. Clone pe /cloneping\n"
-        f"4. /play song\n\n"
-        f"/myclones · /delclone {bot_id}"
+        f"✅ <b>{smallcaps('bot started')}</b>\n\n"
+        f"{smallcaps('username')} : <b>{who}</b>\n"
+        f"{smallcaps('userid')} : <code>{bot_id}</code>"
     )
     await _edit(status, text)
 
@@ -272,8 +267,8 @@ async def myclones_cmd(client, message: Message):
             if c["owner_id"] == uid:
                 seen[int(c["bot_id"])] = {**seen.get(int(c["bot_id"]), {}), **c}
         if not seen:
-            return await _reply(message, "📭 Koi clone nahi.\n<code>/clone TOKEN</code>")
-        lines = ["🌟 <b>Your Clones</b>\n"]
+            return await _reply(message, f"📭 {smallcaps('koi clone nahi.')}\n<code>/clone TOKEN</code>")
+        lines = [f"🌟 <b>{smallcaps('your clones')}</b>\n"]
         for i, (bid, r) in enumerate(seen.items(), 1):
             un = r.get("username") or ""
             tag = f"@{un}" if un else f"<code>{bid}</code>"
@@ -355,4 +350,4 @@ async def all_clones_cmd(client, message: Message):
         await _reply(message, f"❌ {e}")
 
 
-print("[clone] plugin loaded OK — handlers registered (group=-5 regex)", flush=True)
+print("[clone] plugin loaded OK", flush=True)
