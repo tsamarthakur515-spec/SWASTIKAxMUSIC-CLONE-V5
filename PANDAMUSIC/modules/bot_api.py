@@ -1,5 +1,6 @@
 """
 Telegram Bot API helpers — bypass broken kurigram KeyboardButtonUrl / Callback.
+Supports per-bot token (main bot OR clone client).
 """
 
 from __future__ import annotations
@@ -61,8 +62,28 @@ def strip_html(text: str) -> str:
     return text
 
 
-async def _post(method: str, payload: dict) -> bool:
-    token = getattr(console, "BOT_TOKEN", None)
+def resolve_token(bot_token: Optional[str] = None, client=None) -> Optional[str]:
+    """Pick token: explicit > client.bot_token > console.BOT_TOKEN."""
+    if bot_token:
+        return str(bot_token).strip()
+    if client is not None:
+        for attr in ("bot_token", "token"):
+            t = getattr(client, attr, None)
+            if t:
+                return str(t).strip()
+        # pyrogram sometimes keeps it on session
+        try:
+            s = getattr(client, "session", None)
+            t = getattr(s, "bot_token", None) if s else None
+            if t:
+                return str(t).strip()
+        except Exception:
+            pass
+    return getattr(console, "BOT_TOKEN", None)
+
+
+async def _post(method: str, payload: dict, bot_token: Optional[str] = None) -> bool:
+    token = resolve_token(bot_token)
     if not token:
         print("[bot_api] BOT_TOKEN missing", flush=True)
         return False
@@ -86,6 +107,7 @@ async def bot_api_send_photo(
     caption: str = "",
     reply_markup=None,
     parse_mode: str = "HTML",
+    bot_token: Optional[str] = None,
 ) -> bool:
     api_markup = markup_to_api(reply_markup)
     markup_json = json.dumps(api_markup) if api_markup else None
@@ -98,7 +120,7 @@ async def bot_api_send_photo(
     }
     if markup_json:
         payload["reply_markup"] = markup_json
-    if await _post("sendPhoto", payload):
+    if await _post("sendPhoto", payload, bot_token=bot_token):
         return True
 
     payload2: dict[str, Any] = {
@@ -108,7 +130,7 @@ async def bot_api_send_photo(
     }
     if markup_json:
         payload2["reply_markup"] = markup_json
-    return await _post("sendPhoto", payload2)
+    return await _post("sendPhoto", payload2, bot_token=bot_token)
 
 
 async def bot_api_send_message(
@@ -117,6 +139,7 @@ async def bot_api_send_message(
     reply_markup=None,
     parse_mode: str = "HTML",
     disable_web_page_preview: bool = True,
+    bot_token: Optional[str] = None,
 ) -> bool:
     api_markup = markup_to_api(reply_markup)
     markup_json = json.dumps(api_markup) if api_markup else None
@@ -129,7 +152,7 @@ async def bot_api_send_message(
     }
     if markup_json:
         payload["reply_markup"] = markup_json
-    if await _post("sendMessage", payload):
+    if await _post("sendMessage", payload, bot_token=bot_token):
         return True
 
     payload2: dict[str, Any] = {
@@ -139,7 +162,7 @@ async def bot_api_send_message(
     }
     if markup_json:
         payload2["reply_markup"] = markup_json
-    return await _post("sendMessage", payload2)
+    return await _post("sendMessage", payload2, bot_token=bot_token)
 
 
 async def bot_api_edit_message(
@@ -150,8 +173,8 @@ async def bot_api_edit_message(
     reply_markup=None,
     is_photo: bool = False,
     parse_mode: str = "HTML",
+    bot_token: Optional[str] = None,
 ) -> bool:
-    """Edit caption (photo msg) or text — used for /start menu buttons."""
     api_markup = markup_to_api(reply_markup)
     markup_json = json.dumps(api_markup) if api_markup else None
 
@@ -165,12 +188,11 @@ async def bot_api_edit_message(
         }
         if markup_json:
             payload["reply_markup"] = markup_json
-        if await _post("editMessageCaption", payload):
+        if await _post("editMessageCaption", payload, bot_token=bot_token):
             return True
-        # plain caption
         payload["caption"] = strip_html(body)[:1024]
         payload.pop("parse_mode", None)
-        if await _post("editMessageCaption", payload):
+        if await _post("editMessageCaption", payload, bot_token=bot_token):
             return True
 
     body = fix_html_for_bot_api(text or caption)
@@ -183,18 +205,23 @@ async def bot_api_edit_message(
     }
     if markup_json:
         payload2["reply_markup"] = markup_json
-    if await _post("editMessageText", payload2):
+    if await _post("editMessageText", payload2, bot_token=bot_token):
         return True
 
     payload2["text"] = strip_html(body)[:4096]
     payload2.pop("parse_mode", None)
-    return await _post("editMessageText", payload2)
+    return await _post("editMessageText", payload2, bot_token=bot_token)
 
 
-async def bot_api_answer_callback(callback_query_id: str, text: str = "", show_alert: bool = False) -> bool:
+async def bot_api_answer_callback(
+    callback_query_id: str,
+    text: str = "",
+    show_alert: bool = False,
+    bot_token: Optional[str] = None,
+) -> bool:
     payload: dict[str, Any] = {"callback_query_id": callback_query_id}
     if text:
         payload["text"] = text[:200]
     if show_alert:
         payload["show_alert"] = "true"
-    return await _post("answerCallbackQuery", payload)
+    return await _post("answerCallbackQuery", payload, bot_token=bot_token)
