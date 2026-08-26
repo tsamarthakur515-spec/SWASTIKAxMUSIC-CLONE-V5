@@ -3,7 +3,7 @@ PANDAMUSIC — Clone bots manager
 
 - New Handler instances (not shared objects)
 - /start uses same full menu as main bot (no minimal override)
-- Essential: only cloneping + fallback start if copy fails
+- client.bot_token set so Bot API sends as clone, not main bot
 """
 
 from __future__ import annotations
@@ -162,7 +162,6 @@ async def db_delete_clone(bot_id: int) -> bool:
 
 
 def _clone_handler(handler) -> Any:
-    """Create a NEW handler instance (sharing objects breaks multi-client)."""
     cls = type(handler)
     callback = getattr(handler, "callback", None)
     if callback is None:
@@ -235,12 +234,10 @@ def _attach_cloneping(client: Client) -> None:
 
 
 def _attach_start_fallback(client: Client) -> None:
-    """Only when plugin handlers failed to copy — still try real start menu."""
     from pyrogram import filters
     from pyrogram.handlers import MessageHandler
 
     async def _start(c, m):
-        # Prefer real start menu from plugins
         try:
             from ..plugins.start import start_message_private
 
@@ -279,7 +276,6 @@ async def start_clone_client(
     username: str = "",
     name: str = "",
 ) -> Dict[str, Any]:
-    """Start clone, copy plugin handlers from main bot, keep client running."""
     token = (token or "").strip()
     if not is_bot_token(token):
         raise RuntimeError("Invalid bot token format. Example: 123456789:AAHxxxx...")
@@ -346,20 +342,20 @@ async def start_clone_client(
             pass
         return _clone_clients[bot_id]
 
-    # Copy ALL main-bot plugin handlers (includes full /start menu)
     n = _copy_handlers(bot, client)
     _attach_cloneping(client)
 
-    # Only if copy failed — attach start that still tries real menu
     if n == 0:
         log.warning("Clone %s: 0 handlers copied — attaching start fallback", bot_id)
         _attach_start_fallback(client)
 
+    # Critical: Bot API fallback must use THIS clone's token
     try:
         client.me = me  # type: ignore
         client.username = username  # type: ignore
         client.id = bot_id  # type: ignore
         client.name = name  # type: ignore
+        client.bot_token = token  # type: ignore
     except Exception:
         pass
 
