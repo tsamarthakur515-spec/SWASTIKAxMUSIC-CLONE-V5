@@ -32,7 +32,8 @@ except Exception as _e:
     traceback.print_exc()
 
     def is_bot_token(text):
-        return bool(re.match(r"^\d{5,15}:[A-Za-z0-9_-]{20,}$", (text or "").strip()))
+        t = re.sub(r"\s+", "", (text or "").strip())
+        return bool(re.match(r"^\d{5,15}:[A-Za-z0-9_-]{20,}$", t))
 
     async def user_can_clone(_uid):
         return True, ""
@@ -51,28 +52,55 @@ except Exception as _e:
 
 
 _pending_token = {}
-TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{20,}$")
+# Full token anywhere in text (handles line-wrap / newline in middle)
+TOKEN_FIND = re.compile(r"(\d{5,15}:[A-Za-z0-9_-]{20,100})")
 
 
 def _is_owner(uid):
     return bool(uid and uid == getattr(console, "OWNER_ID", 0))
 
 
-def _extract_token(message):
-    """Parse token from /clone <token> even if split oddly."""
-    text = (message.text or message.caption or "").strip()
-    if not text:
+def _normalize_token(raw: str) -> str:
+    """Remove spaces/newlines that Telegram wraps into the token."""
+    return re.sub(r"\s+", "", (raw or "").strip())
+
+
+def _extract_token(message) -> str:
+    """Parse token from /clone <token> — works if token breaks across lines."""
+    text = (message.text or message.caption or "") or ""
+    if not text.strip():
         return ""
-    parts = text.split(None, 1)
-    if len(parts) < 2:
-        return ""
-    rest = parts[1].strip()
-    first = rest.split()[0].strip()
-    if TOKEN_RE.match(first) or is_bot_token(first):
-        return first
-    if TOKEN_RE.match(rest) or is_bot_token(rest):
-        return rest
-    return first if ":" in first else ""
+
+    # 1) Join everything after first command word, strip all whitespace
+    parts = text.strip().split(None, 1)
+    if len(parts) >= 2:
+        joined = _normalize_token(parts[1])
+        if is_bot_token(joined):
+            return joined
+        m = TOKEN_FIND.search(joined)
+        if m:
+            return m.group(1)
+
+    # 2) Search whole message after removing newlines/spaces around token
+    compact = _normalize_token(text)
+    m = TOKEN_FIND.search(compact)
+    if m:
+        return m.group(1)
+
+    # 3) message.command leftover (pyrogram splits on whitespace — broken token)
+    try:
+        cmd = message.command or []
+        if len(cmd) >= 2:
+            joined = _normalize_token("".join(cmd[1:]))
+            if is_bot_token(joined):
+                return joined
+            m = TOKEN_FIND.search(joined)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+
+    return ""
 
 
 async def _safe_reply(message, text):
@@ -82,11 +110,14 @@ async def _safe_reply(message, text):
         print(f"[clone] reply fail: {e}", flush=True)
         try:
             return await message.reply_text(re.sub(r"<[^>]+>", "", text))
-        except Exception:
+        except Exception as e2:
+            print(f"[clone] plain reply fail: {e2}", flush=True)
             return None
 
 
 async def _safe_edit(status, text):
+    if status is None:
+        return None
     try:
         return await status.edit_text(text, parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -100,15 +131,21 @@ async def _safe_edit(status, text):
                 return None
 
 
-@bot.on_message(filters.command(["clone", "clonebot"], prefixes=["/", "!", "."]) & filters.private)
+@bot.on_message(
+    filters.command(["clone", "clonebot"], prefixes=["/", "!", "."]) & filters.private
+)
 async def clone_cmd(client, message: Message):
-    print(f"[clone] /clone from {getattr(message.from_user, 'id', None)}", flush=True)
+    print(
+        f"[clone] /clone from {getattr(message.from_user, 'id', None)} text={((message.text or '')[:80])!r}",
+        flush=True,
+    )
     try:
         if not message.from_user:
             return await _safe_reply(message, "❌ User not found.")
 
         uid = message.from_user.id
         token = _extract_token(message)
+        print(f"[clone] extracted token len={len(token)} ok={is_bot_token(token)}", flush=True)
 
         if not token:
             _pending_token[uid] = True
@@ -118,9 +155,10 @@ async def clone_cmd(client, message: Message):
                 "Apna bot banane ke liye:\n"
                 "1. @BotFather → /newbot\n"
                 "2. Token copy karo\n"
-                "3. Yahan bhejo:\n"
+                "3. <b>Ek hi line</b> me bhejo:\n"
                 "   <code>/clone 123456:AAHxxxx</code>\n\n"
-                "Ya abhi seedha <b>BOT_TOKEN</b> is chat me paste karo.\n\n"
+                "⚠️ Token beech me enter / line-break mat do.\n\n"
+                "Ya /clone likho, phir agli message me sirf token paste karo.\n\n"
                 "• /myclones — list\n"
                 "• /delclone ID — delete\n\n"
                 "BotFather: https://t.me/BotFather",
@@ -147,25 +185,29 @@ async def clone_token_paste(client, message: Message):
     uid = message.from_user.id
     if not _pending_token.get(uid):
         return
-    text = (message.text or "").strip()
-    if not (TOKEN_RE.match(text) or is_bot_token(text)):
-        if ":" in text and len(text) > 20:
+    text = _normalize_token(message.text or "")
+    m = TOKEN_FIND.search(text)
+    token = m.group(1) if m else text
+    if not is_bot_token(token):
+        if ":" in text and len(text) > 15:
             return await _safe_reply(
                 message,
-                "❌ Token format galat.\n<code>123456789:AAHxxxx...</code>",
+                "❌ Token format galat.\n<code>123456789:AAHxxxx...</code>\n\n"
+                "Poora token <b>ek line</b> me bhejo (enter mat dabao).",
             )
         return
     _pending_token.pop(uid, None)
     print(f"[clone] token paste from {uid}", flush=True)
-    await _run_clone(client, message, text)
+    await _run_clone(client, message, token)
 
 
 async def _run_clone(client, message: Message, token: str):
     uid = message.from_user.id
-    token = token.strip()
+    token = _normalize_token(token)
 
     status = await _safe_reply(message, "⏳ Clone start ho raha hai... thoda wait karo.")
     if status is None:
+        print("[clone] could not send status reply", flush=True)
         return
 
     if not _CLONE_OK:
@@ -178,7 +220,9 @@ async def _run_clone(client, message: Message, token: str):
     if not is_bot_token(token):
         return await _safe_edit(
             status,
-            "❌ Invalid token format.\nExample: <code>123456789:AAHxxxx...</code>",
+            "❌ Invalid / incomplete token.\n"
+            "Poora token ek line me bhejo.\n"
+            "Example: <code>123456789:AAHxxxx...</code>",
         )
 
     ok, reason = await user_can_clone(uid)
@@ -194,8 +238,8 @@ async def _run_clone(client, message: Message, token: str):
             status,
             f"❌ Clone fail:\n<code>{str(e)[:500]}</code>\n\n"
             "• @BotFather se <b>naya</b> token lo\n"
-            "• Main Swastika bot ka token mat use karo\n"
-            "• Token me space / extra text mat rakho",
+            "• Main bot ka token mat use karo\n"
+            "• Token me space / line-break mat rakho",
         )
 
     try:
@@ -216,7 +260,7 @@ async def _run_clone(client, message: Message, token: str):
         f"1. Clone bot ko group me add karo\n"
         f"2. Admin + manage video chats do\n"
         f"3. Clone pe <code>/cloneping</code>\n"
-        f"4. Phir group me <code>/play song</code>\n\n"
+        f"4. Group me <code>/play song</code>\n\n"
         f"/myclones · /delclone {entry['bot_id']}",
     )
 
@@ -251,7 +295,9 @@ async def myclones_cmd(client, message: Message):
         await _safe_reply(message, f"❌ {e}")
 
 
-@bot.on_message(filters.command(["delclone", "removeclone", "rmclone"], prefixes=["/", "!", "."]))
+@bot.on_message(
+    filters.command(["delclone", "removeclone", "rmclone"], prefixes=["/", "!", "."])
+)
 async def delclone_cmd(client, message: Message):
     try:
         if not message.from_user:
@@ -300,12 +346,16 @@ async def all_clones_cmd(client, message: Message):
         un = r.get("username") or ""
         tag = f"@{un}" if un else str(bid)
         online = "🟢" if bid in running else "🔴"
-        lines.append(f"{online} {tag} · owner <code>{r['owner_id']}</code> · <code>{bid}</code>")
+        lines.append(
+            f"{online} {tag} · owner <code>{r['owner_id']}</code> · <code>{bid}</code>"
+        )
     for bid, c in running.items():
         if bid not in seen:
             un = c.get("username") or ""
             tag = f"@{un}" if un else str(bid)
-            lines.append(f"🟢 {tag} · owner <code>{c['owner_id']}</code> · <code>{bid}</code>")
+            lines.append(
+                f"🟢 {tag} · owner <code>{c['owner_id']}</code> · <code>{bid}</code>"
+            )
     await _safe_reply(message, "\n".join(lines))
 
 
