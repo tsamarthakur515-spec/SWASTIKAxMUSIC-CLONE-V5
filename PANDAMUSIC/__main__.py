@@ -21,9 +21,10 @@ def _force_load_clone_plugin() -> bool:
     import importlib
 
     try:
-        mod = importlib.import_module("PANDAMUSIC.plugins.clone")
-        # re-load if needed
-        importlib.reload(mod)
+        if "PANDAMUSIC.plugins.clone" in sys.modules:
+            console.logs(__name__).info("✅ clone plugin already in sys.modules")
+            return True
+        importlib.import_module("PANDAMUSIC.plugins.clone")
         console.logs(__name__).info("✅ clone plugin force-loaded")
         return True
     except Exception as e:
@@ -44,19 +45,6 @@ def _register_emergency_clone_handler():
             flush=True,
         )
         try:
-            # Prefer real plugin handler path if available
-            try:
-                from .plugins import clone as clone_mod
-
-                if hasattr(clone_mod, "_do_clone") and hasattr(clone_mod, "_extract_token"):
-                    token = clone_mod._extract_token(message)
-                    if token:
-                        await clone_mod._do_clone(message, token)
-                        return
-                    # fall through to help
-            except Exception as e:
-                print(f"[clone-emergency] plugin path fail: {e}", flush=True)
-
             text = (message.text or "") or ""
             compact = re.sub(r"\s+", "", text)
             m = token_re.search(compact)
@@ -100,7 +88,10 @@ def _register_emergency_clone_handler():
             print(f"[clone-emergency] error: {e}", flush=True)
             traceback.print_exc()
             try:
-                await message.reply_text(f"❌ Clone error:\n<code>{str(e)[:400]}</code>", parse_mode=ParseMode.HTML)
+                await message.reply_text(
+                    f"❌ Clone error:\n<code>{str(e)[:400]}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
             except Exception:
                 pass
 
@@ -108,7 +99,6 @@ def _register_emergency_clone_handler():
 
 
 async def main():
-    # Old session files clean
     for file in os.listdir():
         if file.endswith(".session") or file.endswith(".session-journal"):
             try:
@@ -116,11 +106,9 @@ async def main():
             except Exception:
                 pass
 
-    # Required folders
     os.makedirs("cache", exist_ok=True)
     os.makedirs("downloads", exist_ok=True)
 
-    # PostgreSQL init (optional — bot runs even if DB is missing/fails)
     try:
         await init_db()
     except Exception as e:
@@ -128,28 +116,24 @@ async def main():
             f"⚠️ Database init skipped: {e} — continuing without DB"
         )
 
-    # Load sudo users
     try:
         await console.sudo_users()
     except Exception as e:
         console.logs(__name__).error(f"❌ Sudo load failed: {e}")
         sys.exit(1)
 
-    # Start bot
     try:
         await bot.start()
     except Exception as e:
         console.logs(__name__).error(f"❌ Failed to start bot: {e}")
         sys.exit(1)
 
-    # Start assistant(s)
     try:
         await app.start()
     except Exception as e:
         console.logs(__name__).error(f"❌ Failed to start assistant: {e}")
         sys.exit(1)
 
-    # Start PyTgCalls
     try:
         await call.start()
     except Exception as e:
@@ -159,23 +143,11 @@ async def main():
     await call.decorators()
     await import_all_plugins()
 
-    # Force clone plugin + emergency handler (never silent /clone)
+    # clone must never be silent
     ok = _force_load_clone_plugin()
     if not ok:
         _register_emergency_clone_handler()
-    else:
-        # still register emergency as backup (group later = lower priority if both fire —
-        # actually both may fire; emergency only if plugin missing)
-        pass
 
-    # Always register emergency as safety net on group 10 (runs if others don't answer)
-    # Use group -5 for high priority emergency
-    try:
-        _register_emergency_clone_handler()
-    except Exception as e:
-        console.logs(__name__).error(f"emergency clone register fail: {e}")
-
-    # Start user clone bots (same handlers + assistants)
     try:
         from .modules.clones import start_all_saved_clones
 
@@ -184,7 +156,6 @@ async def main():
     except Exception as e:
         console.logs(__name__).warning(f"⚠️ Clone restore skipped: {e}")
 
-    # Debug: count handlers on bot
     try:
         disp = getattr(bot, "dispatcher", None)
         groups = getattr(disp, "groups", {}) or {}
