@@ -7,6 +7,7 @@ from ..modules.bot_api import (
     bot_api_send_message,
     bot_api_edit_message,
     bot_api_answer_callback,
+    resolve_token,
 )
 from .maintenance import block_if_maintenance, block_cb_if_maintenance
 
@@ -30,6 +31,11 @@ E_START = "6147614817952735246"
 E_HELP_INSIDE = "6154314112236001069"
 E_CMD_BTN = "5823571441118876120"
 E_START_STICKER = "6154300385520522693"
+
+
+def _client_token(client) -> str | None:
+    """Token for this client (clone or main)."""
+    return resolve_token(client=client)
 
 
 def _btn(text: str, style=None, **kwargs) -> InlineKeyboardButton:
@@ -308,12 +314,12 @@ def about_caption() -> str:
     return f"<blockquote expandable>{tg_emoji(E.CHECK, '✅')} {body}</blockquote>"
 
 
-async def _edit_menu(query, caption: str, markup: InlineKeyboardMarkup):
-    """Menu navigation — Bot API first (kurigram KeyboardButtonCallback broken)."""
+async def _edit_menu(query, caption: str, markup: InlineKeyboardMarkup, client=None):
     msg = query.message
     chat_id = msg.chat.id
     message_id = msg.id
     is_photo = bool(getattr(msg, "photo", None))
+    token = _client_token(client) if client else None
 
     ok = await bot_api_edit_message(
         chat_id=chat_id,
@@ -322,6 +328,7 @@ async def _edit_menu(query, caption: str, markup: InlineKeyboardMarkup):
         caption=caption,
         reply_markup=markup,
         is_photo=is_photo,
+        bot_token=token,
     )
     if ok:
         print("[start] menu edit via Bot API OK", flush=True)
@@ -349,8 +356,9 @@ async def _edit_menu(query, caption: str, markup: InlineKeyboardMarkup):
             print(f"[start] edit no-kb failed: {e2}", flush=True)
 
 
-async def _safe_reply(message, photo, caption, buttons):
+async def _safe_reply(message, photo, caption, buttons, client=None):
     chat_id = message.chat.id
+    token = _client_token(client) if client else None
 
     if photo:
         try:
@@ -367,15 +375,17 @@ async def _safe_reply(message, photo, caption, buttons):
     except Exception as e:
         print(f"[start] pyrogram text+kb: {e}", flush=True)
 
-    print("[start] using Bot API fallback for buttons", flush=True)
+    print(f"[start] Bot API fallback token={'clone' if token and token != console.BOT_TOKEN else 'main'}", flush=True)
     if photo:
         ok = await bot_api_send_photo(
-            chat_id, photo=photo, caption=caption, reply_markup=buttons
+            chat_id, photo=photo, caption=caption, reply_markup=buttons, bot_token=token
         )
         if ok:
             print("[start] Bot API photo+buttons OK", flush=True)
             return True
-    ok = await bot_api_send_message(chat_id, text=caption, reply_markup=buttons)
+    ok = await bot_api_send_message(
+        chat_id, text=caption, reply_markup=buttons, bot_token=token
+    )
     if ok:
         print("[start] Bot API text+buttons OK", flush=True)
         return True
@@ -415,13 +425,19 @@ async def start_message_private(client, message):
     mention = _safe_mention(message.from_user)
     photo = console.START_IMAGE_URL
     caption = start_caption(mention)
-    buttons = start_markup(client.me.username)
+    # Always use THIS client identity (clone username if clone)
+    try:
+        me = client.me or await client.get_me()
+        bot_username = me.username or ""
+    except Exception:
+        bot_username = getattr(client, "username", "") or ""
+    buttons = start_markup(bot_username)
     if message.command and message.command[0].lower() == "help":
         caption = help_list_caption()
         buttons = help_menu_markup()
 
     try:
-        await _safe_reply(message, photo, caption, buttons)
+        await _safe_reply(message, photo, caption, buttons, client=client)
     except Exception as e:
         print(f"[start] all reply paths failed: {e}", flush=True)
 
@@ -431,17 +447,20 @@ async def start_message_private(client, message):
             username = f"@{message.from_user.username}" if message.from_user.username else "N/A"
             user_id = message.from_user.id
             log_message = f"🚀 **{message.from_user.mention} Just Started the Bot!**\n\n🧑 **Full Name:** {full_name}\n🔗 **Username:** {username}\n🆔 **Telegram ID:** `{user_id}`"
-            await client.send_message(console.LOG_GROUP_ID, text=log_message, disable_web_page_preview=True)
+            if console.LOG_GROUP_ID:
+                await client.send_message(console.LOG_GROUP_ID, text=log_message, disable_web_page_preview=True)
         except Exception:
             pass
 
 
-async def _answer(query, text="", show_alert=False):
+async def _answer(query, text="", show_alert=False, client=None):
     try:
         await query.answer(text, show_alert=show_alert)
     except Exception:
         try:
-            await bot_api_answer_callback(query.id, text=text, show_alert=show_alert)
+            await bot_api_answer_callback(
+                query.id, text=text, show_alert=show_alert, bot_token=_client_token(client)
+            )
         except Exception:
             pass
 
@@ -450,85 +469,85 @@ async def _answer(query, text="", show_alert=False):
 async def repo_alert_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _answer(query, smallcaps("repo private hai") + " 🔒", show_alert=True)
+    await _answer(query, smallcaps("repo private hai") + " 🔒", show_alert=True, client=client)
 
 
 @bot.on_callback_query(rgx("support_alert"))
 async def support_alert_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _answer(query, smallcaps("support chat set nahi hai config me"), show_alert=True)
+    await _answer(query, smallcaps("support chat set nahi hai config me"), show_alert=True, client=client)
 
 
 @bot.on_callback_query(rgx("update_alert"))
 async def update_alert_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _answer(query, smallcaps("update chat set nahi hai config me"), show_alert=True)
+    await _answer(query, smallcaps("update chat set nahi hai config me"), show_alert=True, client=client)
 
 
 @bot.on_callback_query(rgx("about_menu"))
 async def about_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, about_caption(), about_markup())
-    await _answer(query)
+    await _edit_menu(query, about_caption(), about_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("help_menu"))
 async def help_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, help_list_caption(), help_menu_markup())
-    await _answer(query)
+    await _edit_menu(query, help_list_caption(), help_menu_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("music_menu"))
 async def music_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, music_list_caption(), music_menu_markup())
-    await _answer(query)
+    await _edit_menu(query, music_list_caption(), music_menu_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("tools_menu"))
 async def tools_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, tools_list_caption(), tools_menu_markup())
-    await _answer(query)
+    await _edit_menu(query, tools_list_caption(), tools_menu_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("moderation_menu"))
 async def moderation_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, moderation_list_caption(), moderation_menu_markup())
-    await _answer(query)
+    await _edit_menu(query, moderation_list_caption(), moderation_menu_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("chatbot_menu"))
 async def chatbot_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, chatbot_list_caption(), chatbot_menu_markup())
-    await _answer(query)
+    await _edit_menu(query, chatbot_list_caption(), chatbot_menu_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("locks_menu"))
 async def locks_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, locks_list_caption(), locks_menu_markup())
-    await _answer(query)
+    await _edit_menu(query, locks_list_caption(), locks_menu_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("fun_menu"))
 async def fun_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
-    await _edit_menu(query, fun_list_caption(), fun_menu_markup())
-    await _answer(query)
+    await _edit_menu(query, fun_list_caption(), fun_menu_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx(r"^cmdhelp\|"))
@@ -538,11 +557,11 @@ async def cmd_help_cb(client, query):
     try:
         key = query.data.split("|", 1)[1].strip().lower()
     except Exception:
-        return await _answer(query, "Invalid.", show_alert=True)
+        return await _answer(query, "Invalid.", show_alert=True, client=client)
     if key not in CMD_USAGE:
-        return await _answer(query, "Unknown command.", show_alert=True)
-    await _edit_menu(query, cmd_usage_caption(key), cmd_help_markup())
-    await _answer(query)
+        return await _answer(query, "Unknown command.", show_alert=True, client=client)
+    await _edit_menu(query, cmd_usage_caption(key), cmd_help_markup(), client=client)
+    await _answer(query, client=client)
 
 
 @bot.on_callback_query(rgx("home_menu"))
@@ -550,5 +569,10 @@ async def home_menu_cb(client, query):
     if await block_cb_if_maintenance(query):
         return
     mention = _safe_mention(query.from_user)
-    await _edit_menu(query, start_caption(mention), start_markup(client.me.username))
-    await _answer(query)
+    try:
+        me = client.me or await client.get_me()
+        uname = me.username or ""
+    except Exception:
+        uname = getattr(client, "username", "") or ""
+    await _edit_menu(query, start_caption(mention), start_markup(uname), client=client)
+    await _answer(query, client=client)
