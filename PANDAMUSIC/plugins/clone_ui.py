@@ -37,6 +37,26 @@ ID_FIND = re.compile(r"^\d{5,15}$")
 _ui_pending: dict = {}
 
 
+def clear_ui_pending(uid: int):
+    _ui_pending.pop(uid, None)
+
+
+def get_ui_mode(uid: int):
+    p = _ui_pending.get(uid)
+    return (p or {}).get("mode")
+
+
+def _clear_cmd_pending(uid: int):
+    """Stop /clone text-paste handler from also firing."""
+    try:
+        from . import clone as clone_mod
+
+        if hasattr(clone_mod, "_pending_token"):
+            clone_mod._pending_token.pop(uid, None)
+    except Exception:
+        pass
+
+
 def _btn(text: str, style=None, **kwargs) -> InlineKeyboardButton:
     if style is not None:
         try:
@@ -71,6 +91,7 @@ def delete_menu_caption() -> str:
     body = (
         f"{smallcaps('delete clone')}\n\n"
         f"{smallcaps('send bot token or bot id of the clone you want to remove.')}\n\n"
+        f"{smallcaps('this will only delete — it will not create a new clone.')}\n\n"
         f"{smallcaps('example token')}:\n"
         f"<code>123456789:AAHxxxxxxxx</code>\n\n"
         f"{smallcaps('example id')}:\n"
@@ -196,8 +217,10 @@ def _set_pending(uid, msg, mode: str):
         "chat_id": msg.chat.id,
         "message_id": msg.id,
         "is_photo": bool(getattr(msg, "photo", None)),
-        "mode": mode,
+        "mode": mode,  # MUST be "create" or "delete"
     }
+    _clear_cmd_pending(uid)
+    print(f"[clone_ui] pending uid={uid} mode={mode}", flush=True)
 
 
 @bot.on_callback_query(rgx("clone_menu"))
@@ -222,6 +245,7 @@ async def delete_clone_menu_cb(client, query):
     if not query.from_user:
         return
     msg = query.message
+    # FORCE delete mode — never create from this screen
     _set_pending(query.from_user.id, msg, "delete")
     await _edit_ui(
         client,
@@ -239,6 +263,9 @@ async def check_clone_cb(client, query):
     if not query.from_user:
         return
     uid = query.from_user.id
+    # listing only — clear any create/delete paste wait
+    clear_ui_pending(uid)
+    _clear_cmd_pending(uid)
     try:
         from ..modules.clones import db_list_clones, get_running_clones
 
@@ -300,6 +327,9 @@ async def check_clone_cb(client, query):
 
 @bot.on_callback_query(rgx("clone_close"))
 async def clone_close_cb(client, query):
+    if query.from_user:
+        clear_ui_pending(query.from_user.id)
+        _clear_cmd_pending(query.from_user.id)
     try:
         await query.message.delete()
     except Exception:
@@ -344,7 +374,7 @@ async def _do_create(client, uid, token, chat_id, message_id, is_photo, pending)
                 f"<blockquote expandable>❌ {smallcaps('invalid token format')}</blockquote>",
                 clone_menu_markup(),
             )
-            _ui_pending[uid] = {**pending, "mode": "create"}
+            _set_pending_raw(uid, pending, "create")
             return
 
         ok, reason = await user_can_clone(uid)
@@ -386,8 +416,15 @@ async def _do_create(client, uid, token, chat_id, message_id, is_photo, pending)
     await _edit_ui(client, chat_id, message_id, is_photo, caption, clone_close_markup())
 
 
+def _set_pending_raw(uid, pending, mode):
+    _ui_pending[uid] = {**pending, "mode": mode}
+    _clear_cmd_pending(uid)
+
+
 async def _do_delete(client, uid, raw, chat_id, message_id, is_photo, pending):
+    """ONLY delete — never start_clone_client."""
     empty_kb = InlineKeyboardMarkup([])
+    print(f"[clone_ui] DELETE path uid={uid} raw_len={len(raw)}", flush=True)
 
     await _edit_ui(
         client,
@@ -408,6 +445,7 @@ async def _do_delete(client, uid, raw, chat_id, message_id, is_photo, pending):
         empty_kb,
     )
 
+    target_id = None
     try:
         from ..modules.clones import (
             db_list_clones,
@@ -415,26 +453,28 @@ async def _do_delete(client, uid, raw, chat_id, message_id, is_photo, pending):
             stop_clone_client,
         )
 
-        target_id = None
         raw = re.sub(r"\s+", "", raw.strip())
 
         if _looks_like_token(raw):
-            # match by token
             for r in await db_list_clones(uid):
                 if (r.get("bot_token") or "").strip() == raw:
                     target_id = int(r["bot_id"])
                     break
             if target_id is None:
-                for c in get_running_clones():
-                    if c.get("owner_id") == uid and c.get("token") == raw:
-                        target_id = int(c["bot_id"])
-                        break
-            if target_id is None:
-                # token left part is often bot id
+                # token prefix is usually the bot id
                 try:
-                    target_id = int(raw.split(":", 1)[0])
+                    maybe = int(raw.split(":", 1)[0])
+                    for r in await db_list_clones(uid):
+                        if int(r["bot_id"]) == maybe:
+                            target_id = maybe
+                            break
+                    if target_id is None:
+                        for c in get_running_clones():
+                            if int(c["bot_id"]) == maybe and int(c["owner_id"]) == uid:
+                                target_id = maybe
+                                break
                 except Exception:
-                    target_id = None
+                    pass
         elif _looks_like_bot_id(raw):
             target_id = int(raw)
 
@@ -447,10 +487,9 @@ async def _do_delete(client, uid, raw, chat_id, message_id, is_photo, pending):
                 f"<blockquote expandable>❌ {smallcaps('invalid token or bot id')}</blockquote>",
                 delete_menu_markup(),
             )
-            _ui_pending[uid] = {**pending, "mode": "delete"}
+            _set_pending_raw(uid, pending, "delete")
             return
 
-        # ownership check
         owner_of = None
         for r in await db_list_clones():
             if int(r["bot_id"]) == target_id:
@@ -471,7 +510,7 @@ async def _do_delete(client, uid, raw, chat_id, message_id, is_photo, pending):
                 f"<blockquote expandable>❌ {smallcaps('clone not found')}</blockquote>",
                 delete_menu_markup(),
             )
-            _ui_pending[uid] = {**pending, "mode": "delete"}
+            _set_pending_raw(uid, pending, "delete")
             return
 
         if owner_of != uid and uid != getattr(console, "OWNER_ID", 0):
@@ -485,7 +524,9 @@ async def _do_delete(client, uid, raw, chat_id, message_id, is_photo, pending):
             )
             return
 
+        # ONLY stop/delete — never start_clone_client
         await stop_clone_client(target_id)
+        print(f"[clone_ui] DELETED bot_id={target_id}", flush=True)
     except Exception as e:
         print(f"[clone_ui] delete fail: {e}", flush=True)
         traceback.print_exc()
@@ -509,8 +550,9 @@ async def _do_delete(client, uid, raw, chat_id, message_id, is_photo, pending):
     await _edit_ui(client, chat_id, message_id, is_photo, caption, clone_close_markup())
 
 
-@bot.on_message(filters.private & filters.text & filters.incoming, group=-3)
+@bot.on_message(filters.private & filters.text & filters.incoming, group=-6)
 async def clone_ui_token_paste(client, message: Message):
+    """group=-6 runs before clone.py (-5/-4) so delete mode wins."""
     if not message.from_user:
         return
     uid = message.from_user.id
@@ -518,7 +560,11 @@ async def clone_ui_token_paste(client, message: Message):
     if not pending:
         return
 
-    mode = pending.get("mode") or "create"
+    mode = pending.get("mode")
+    if mode not in ("create", "delete"):
+        print(f"[clone_ui] bad mode={mode!r} — ignore", flush=True)
+        return
+
     text_raw = (message.text or "").strip()
     compact = re.sub(r"\s+", "", text_raw)
 
@@ -528,12 +574,16 @@ async def clone_ui_token_paste(client, message: Message):
     if mode == "create":
         if not _looks_like_token(token):
             return
-    else:  # delete — token OR numeric bot id
+    else:
+        # delete — token OR numeric bot id only
         if not (_looks_like_token(token) or _looks_like_bot_id(compact)):
             return
         token = token if _looks_like_token(token) else compact
 
+    # consume pending + clear /clone command pending
     _ui_pending.pop(uid, None)
+    _clear_cmd_pending(uid)
+
     chat_id = pending["chat_id"]
     message_id = pending["message_id"]
     is_photo = pending.get("is_photo", True)
@@ -542,6 +592,8 @@ async def clone_ui_token_paste(client, message: Message):
         await message.delete()
     except Exception:
         pass
+
+    print(f"[clone_ui] paste mode={mode} uid={uid}", flush=True)
 
     if mode == "delete":
         await _do_delete(client, uid, token, chat_id, message_id, is_photo, pending)
